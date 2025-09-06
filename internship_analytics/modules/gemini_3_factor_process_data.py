@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from google import genai
 
 from .config.logger_config import get_logger
+from .request_to_gemini_api import call_to_gemini_api
 
 load_dotenv()
 logger = get_logger("gemini_data_processor")
@@ -145,22 +146,6 @@ def stream_json_objects(file_path: str):
         logger.error(f"Ошибка при потоковом чтении файла {file_path}: {e}")
 
 
-def _call_gemini_api(prompt: str, model: str) -> str:
-    global gemini_client
-    try:
-        response = gemini_client.models.generate_content(
-            model=model,
-            contents=prompt
-        )
-        return response.text.strip()
-    except ValueError:
-        logger.warning(f"Получен пустой или заблокированный ответ от модели {model}.")
-        return ""
-    except Exception as e:
-        logger.error(f"Ошибка при вызове API Gemini для модели {model}: {e}")
-        return ""
-
-
 def clean_raw_data(input_file_path: str, output_file_path: str):
     logger.info("--- НАЧАЛО УРОВНЯ 1: Потоковая очистка сырых данных ---")
 
@@ -187,7 +172,7 @@ def clean_raw_data(input_file_path: str, output_file_path: str):
                     source_weight=item.get('weight', 0),
                     url=item.get('url', '')
                 ) + "\n" + content_to_clean
-                cleaned_text = _call_gemini_api(prompt, GEMINI_MODEL_1)
+                cleaned_text = call_to_gemini_api(prompt, GEMINI_MODEL_1)
 
                 item['cleaned_text'] = cleaned_text
 
@@ -239,7 +224,7 @@ def filter_and_deduplicate_data(input_file_path: str, output_file_path: str, con
                     url=item.get('url', ''),
                     date=item.get('date', '')
                 )
-                relevance_response = _call_gemini_api(prompt, GEMINI_MODEL_2)
+                relevance_response = call_to_gemini_api(prompt, GEMINI_MODEL_2)
 
                 if relevance_response and 'да' in relevance_response.lower():
                     logger.info(f"СООТВЕТСТВИЕ: {item.get('url')} добавлен.")
@@ -290,7 +275,7 @@ def summarize_final_data(input_file_path: str, output_file_path: str, context_qu
                 prompt = PROMPT_3_SUMMARIZE_CHUNK_TEMPLATE.format(context_query=context_query, chunk_texts=chunk_texts)
 
                 logger.info(f"Обработка чанка из {len(chunk)} статей...")
-                summary = _call_gemini_api(prompt, GEMINI_MODEL_1)
+                summary = call_to_gemini_api(prompt, GEMINI_MODEL_1)
                 if summary:
                     intermediate_summaries.append(summary)
 
@@ -309,7 +294,7 @@ def summarize_final_data(input_file_path: str, output_file_path: str, context_qu
             ])
             prompt = PROMPT_3_SUMMARIZE_CHUNK_TEMPLATE.format(context_query=context_query, chunk_texts=chunk_texts)
             logger.info(f"Обработка финального чанка из {len(chunk)} статей...")
-            summary = _call_gemini_api(prompt, GEMINI_MODEL_1)
+            summary = call_to_gemini_api(prompt, GEMINI_MODEL_1)
             if summary:
                 intermediate_summaries.append(summary)
 
@@ -327,7 +312,7 @@ def summarize_final_data(input_file_path: str, output_file_path: str, context_qu
     final_prompt = PROMPT_3_FINAL_SUMMARY_TEMPLATE.format(context_query=context_query,
                                                           combined_summaries=combined_summaries)
 
-    final_summary = _call_gemini_api(final_prompt, GEMINI_MODEL_3)
+    final_summary = call_to_gemini_api(final_prompt, GEMINI_MODEL_3)
 
     if not final_summary:
         logger.error("Не удалось сгенерировать финальную сводку.")
