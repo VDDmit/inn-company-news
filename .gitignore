@@ -1,0 +1,54 @@
+/internship_analytics/output/
+/internship_analytics/modules/test_tech/
+/internship_analytics/modules/logs/
+/gemini/
+/ddos/
+/DDA/
+/data_for_me/
+/internship_analytics/input/
+/internship_analytics/.env
+.DS_Store
+# Custom project directories
+/internship_analytics/output/
+/internship_analytics/modules/test_tech/
+/internship_analytics/logs/
+/gemini/
+/ddos/
+/DDA/
+/data_for_me/
+/internship_analytics/input/
+/internship_analytics/.env
+
+# macOS system files
+.DS_Store
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.env/
+.venv/
+env/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+.tox/
+htmlcov/
+
+# IDE configs
+.idea/
+.vscode/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
