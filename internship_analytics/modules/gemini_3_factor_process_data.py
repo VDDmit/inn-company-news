@@ -5,21 +5,12 @@ from decimal import Decimal
 
 import ijson
 from dotenv import load_dotenv
-from google import genai
 
 from .config.logger_config import get_logger
 from .request_to_gemini_api import call_to_gemini_api
 
 load_dotenv()
 logger = get_logger("gemini_data_processor")
-
-gemini_client = None
-try:
-    api_key = os.environ["GENAI_API_KEY"]
-    gemini_client = genai.Client(api_key=api_key)
-except KeyError:
-    logger.critical("GENAI_API_KEY не найден в переменных окружения. Завершение работы.")
-    exit(1)
 
 PROMPT_1 = """
 Ты — редактор-экстрактор. Твоя задача — очистить предоставленный сырой текст, извлекая из него только связный и осмысленный контент, относящийся к основной теме документа.
@@ -48,6 +39,7 @@ PROMPT_1 = """
 
 PROMPT_2_TEMPLATE = """
 Определи, содержит ли предоставленный текст информацию, связанную с запросом '{context_query}'.
+Если запрос связан с состоянием рынка или какой-то аналитикой - оставь, так же если в запросе просится предоставить что то на тему (рынок, конкуренты, тренды, регуляции) оставляй это и пиши одним словом 'да'
 
 Метаданные источника:
 - Домен: {source_domain}

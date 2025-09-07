@@ -258,6 +258,8 @@ def run_full_search_and_parse(user_search_query: str, domains_to_search: List[st
     output_filename = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_parsed.json"
     output_filepath = os.path.join(path_to_output, output_filename)
 
+    os.makedirs(path_to_output, exist_ok=True)
+
     with open(output_filepath, 'w', encoding='utf-8') as f:
         json.dump(unique_articles, f, ensure_ascii=False, indent=2)
 

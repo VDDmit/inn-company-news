@@ -1,4 +1,6 @@
 import re
+import tempfile
+import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -7,9 +9,11 @@ from dotenv import load_dotenv
 from conf import *
 from internship_analytics.modules.egrul_parser_json import run_egrul_parser_task
 from internship_analytics.modules.gemini_3_factor_process_data import run_gemini_processing_pipeline
+from internship_analytics.modules.market_digest import get_market_digest
 from internship_analytics.modules.news import run_full_search_and_parse
 from internship_analytics.modules.pandas_processor import *
 from modules.config.logger_config import get_logger
+from modules.merge_summary import fuse_summaries
 
 load_dotenv()
 logger = get_logger("main")
@@ -201,29 +205,76 @@ def process_seo_news(ctx: CompanyContext) -> dict[str, Optional[str]]:
     )
 
 
+
+
 # =========================
 # ТОЧКА ВХОДА
 # =========================
 
 def start_internship_analytics(target_inn: str) -> str:
-    """
-    1) Валидация ИНН и сбор базовых данных (ЕГРЮЛ/CSV/имена/город) в CompanyContext.
-    2) Отдельная обработка новостей по компании и по SEO.
-    3) Возвращает JSON-строку с агрегированным результатом (контекст + пути к файлам новостей).
-    """
     logger.info("Запуск валидации ИНН.")
     valid_inn = validity_inn_check(target_inn)
 
-    # Если проверка вернула текст ошибки — прерываемся и возвращаем её прямо.
     if not valid_inn.isdigit() or len(valid_inn) != 10:
         return json.dumps({"error": valid_inn}, ensure_ascii=False, indent=2)
 
-    # Контекст компании (ключевые переменные доступны везде через ctx и/или CURRENT_CONTEXT)
     ctx = collect_company_context(valid_inn)
 
     # Новости
     company_news = process_company_news(ctx)
     seo_news = process_seo_news(ctx)
+
+    company_summary_path = company_news.get("level_3_summary_path")
+    seo_summary_path = seo_news.get("level_3_summary_path")
+
+    os.makedirs(FINAL_REPORTS_OUTPUT_DIR, exist_ok=True)
+
+    company_seo_fused_output_path = os.path.join(FINAL_REPORTS_OUTPUT_DIR, f"{ctx.inn}_company_seo_fused_summary.txt")
+    csv_fused_output_path = os.path.join(FINAL_REPORTS_OUTPUT_DIR, f"{ctx.inn}_csv_company_seo_fused_summary.txt")
+
+    company_seo_fused_path = fuse_summaries(
+        first_summary_path=company_summary_path,
+        second_summary_path=seo_summary_path,
+        output_path=company_seo_fused_output_path,
+        inn=ctx.inn,
+        company_full_name=ctx.company_full_name,
+        seo_full_name=ctx.seo_full_name,
+        city=ctx.city,
+        model="models/gemini-2.5-pro",
+        max_output_tokens=10000,
+    )
+
+    time.sleep(20)
+
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as tmp:
+        json.dump(ctx.csv_json, tmp, ensure_ascii=False, indent=2)
+        tmp_path = tmp.name
+
+    logger.info(f"{ctx.csv_json}")
+    csv_company_seo_fused_path = fuse_summaries(
+        first_summary_path=company_seo_fused_path,
+        second_summary_path=tmp_path,
+        output_path=csv_fused_output_path,
+        inn=ctx.inn,
+        company_full_name=ctx.company_full_name,
+        seo_full_name=ctx.seo_full_name,
+        city=ctx.city,
+        model="models/gemini-2.5-pro",
+        max_output_tokens=10000,
+    )
+
+    time.sleep(20)
+
+    market_digest_path = ""
+    if company_seo_fused_path and os.path.exists(company_seo_fused_path):
+        with open(company_seo_fused_path, "r", encoding="utf-8") as f:
+            fused_text = f.read()
+        market_digest_path = get_market_digest(
+            fused_text,
+            domains=ctx.domains,
+        )
+
+
 
     result = {
         "inn": ctx.inn,
@@ -234,9 +285,12 @@ def start_internship_analytics(target_inn: str) -> str:
         "csv_json": ctx.csv_json,
         "company_news": company_news,
         "seo_news": seo_news,
+        "final_fused_summary_path": company_seo_fused_path,
+        "csv_fused_summary_path": csv_company_seo_fused_path,
+        "market_digest_path": market_digest_path
     }
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 if __name__ == "__main__":
-    print(start_internship_analytics(str(7810453178)))
+    print(start_internship_analytics(str(9709086205)))
