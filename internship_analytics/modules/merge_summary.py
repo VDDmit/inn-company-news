@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 from typing import Optional
 
 from internship_analytics.modules.request_to_gemini_api import call_to_gemini_api
@@ -6,60 +7,81 @@ from .config.logger_config import get_logger
 
 logger = get_logger("merge_summary")
 
-PROMPT_FUSE = """
-Ты — senior аналитик-эксперт. У тебя есть две итоговые сводки по одной компании: 
-по самой компании и по её руководителю (SEO). 
-Задача — подготовить ЕДИНЫЙ, целостный и консистентный аналитический отчет.
-Пиши сразу по теме, без вступлений и обращений, без слов о себе.
+PROMPT_FUSE = r"""
+You are a senior risk analyst. Operate in STRICT extractive mode: use ONLY the two provided summaries.  
+Do NOT invent facts. If data is missing, output exactly: “нет данных”.
 
-Контекст:
-- ИНН: {inn}
-- Компания: {company_full_name}
-- Руководитель: {seo_full_name}
-- Город: {city}
+=== OUTPUT LANGUAGE ===
+- Russian only.
 
-ТРЕБОВАНИЯ К ОТЧЕТУ:
-1. **Синтез**:
-   - Объедини обе сводки в единую структуру.
-   - Удали дублирующиеся факты, переформулируй их в одно ясное утверждение.
-   - Если есть противоречия — отметь их явно. Основную версию выбери по принципу: 
-     большее количество подтверждений, более свежая дата, более высокий вес источников.
-   - Сохрани как факты, так и смежный контекст (партнеры, суды, география, проекты).
+=== TIME WINDOW ===
+- 365 days ending on {generation_date} (inclusive).
+- Dates must be in DD.MM.YYYY format.
 
-2. **Структура отчета**:
-   - **Executive Summary (Резюме)**: 5–7 ключевых выводов о компании и её руководителе.
-   - **Ключевые факты и события** (сгруппируй по блокам):
-       • Финансы и право (судебные дела, налоги, отчетность, регистрационные данные).  
-       • Партнёры и контрагенты (связи, альянсы, конфликты).  
-       • Репутация и PR (медиа, позитив/негатив, имидж руководителя).  
-       • География и активы (офисы, филиалы, зарубежные связи).  
-       • Операционная деятельность (продукты, услуги, проекты).  
-   - **Риски и возможности**: угрозы для бизнеса и управленца, а также перспективы роста.  
-   - **Хронология**: если есть даты, построй последовательность ключевых событий.  
-   - **Заключение**: общий аналитический вывод по состоянию компании и фигуре SEO.
+=== INPUTS ===
+- INN: {inn}
+- Company: {company_full_name}
+- CEO: {seo_full_name}
+- City: {city}
+- Company Summary: {company_summary}
+- CEO Summary: {seo_summary}
 
-3. **Работа с данными (числовыми и табличными)**:
-   - Если в тексте встречаются данные в формате JSON или числовые показатели (например, выручка, долги, капитал, количество сотрудников), 
-     не изменяй сам текст сводок, но:
-       • вынеси ключевые значения,  
-       • сделай краткие выводы по ним (например: рост/спад, соотношения, тренды).  
-   - Представь такие данные в структурированном виде: список или мини-таблица.
+=== GOAL ===
+Produce ONE unified, consistent analytical report.  
+Merge the two summaries, eliminate duplicates, and explicitly flag contradictions.  
+If conflicting, prefer the version with:  
+- more confirmations,  
+- more recent date,  
+- higher-weight sources.
 
-4. **Тон и стиль**:
-   - Четкий аналитический язык, без воды.  
-   - Используй списки, подзаголовки, структурированную подачу.  
-   - Русский язык, деловой стиль.  
-   - Пиши так, как будто это доклад для совета директоров или инвесторов.
+=== REPORT STRUCTURE (strict order) ===
 
-Сводка A (Компания):
----
-{company_summary}
----
+1) Title block (two lines):  
+   Одностраничный отчёт — {company_full_name}  
+   (руководитель: {seo_full_name}, ИНН {inn}, город {city})
 
-Сводка B (SEO):
----
-{seo_summary}
----
+2) Executive Summary (Резюме)  
+   - 5–7 concise bullet points with the key findings about the company and its CEO.  
+   - No duplication, fact-based only.  
+
+3) Ключевые факты и события  
+   Group as bullet points under subheadings:  
+   - Финансы и право (lawsuits, taxes, reports, registration)  
+   - Партнёры и контрагенты (links, alliances, conflicts)  
+   - Репутация и PR (media, tone, CEO image)  
+   - География и активы (offices, branches, foreign ties)  
+   - Операционная деятельность (products, services, projects)  
+
+4) Риски и возможности  
+   - List business threats and risks for the CEO.  
+   - List potential growth opportunities.  
+
+5) Хронология  
+   - Build a timeline of key events with dates.  
+   - If no dates → output “нет данных”.  
+
+6) Заключение  
+   - One concise paragraph with the overall analytical judgment about the company and the CEO.  
+
+7) Numerical and tabular data  
+   - If JSON data or numerical indicators exist (revenue, debt, capital, employees):  
+     • extract key values,  
+     • add brief business interpretation (growth/decline/trend),  
+     • present as a short list or mini-table.  
+   - If none → “нет данных”.  
+
+8) Источники  
+   - Always place sources at the end in a table.  
+   - If multiple tables exist → merge them.  
+   - If no sources → output “нет данных”.  
+   - Table format (Markdown, three columns):  
+     | Дата | Заголовок/суть | Источник |
+
+=== STYLE & RULES ===
+- Business-like, concise, structured.  
+- Output ONLY in Russian.  
+- Do not add sections beyond the defined structure.  
+- If field missing → output exactly “нет данных”.  
 """
 
 
@@ -98,6 +120,7 @@ def fuse_summaries(
             city=city or "",
             company_summary=company_summary or "—",
             seo_summary=seo_summary or "—",
+            generation_date=datetime.now().strftime("%d.%m.%Y"),
         )
 
         fused_text = call_to_gemini_api(prompt, model=model, max_output_tokens=max_output_tokens)

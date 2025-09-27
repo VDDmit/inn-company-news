@@ -12,111 +12,174 @@ from .request_to_gemini_api import call_to_gemini_api
 load_dotenv()
 logger = get_logger("gemini_data_processor")
 
-PROMPT_1 = """
-Ты — редактор-экстрактор. Твоя задача — очистить предоставленный сырой текст, извлекая из него только связный и осмысленный контент, относящийся к основной теме документа.
+PROMPT_1 = r"""
+You are a senior risk analyst acting as a STRICT extractor/cleaner. Use ONLY the provided raw text.
+Do NOT invent, infer, or add facts. If nothing relevant remains, output exactly: "нет данных".
 
-Метаданные источника:
-- Домен: {source_domain}
-- Вес источника (0–1): {source_weight}
+=== OUTPUT LANGUAGE ===
+- Russian only.
+
+=== INPUT METADATA ===
+- Source domain: {source_domain}
+- Source weight (0–1): {source_weight}
 - URL: {url}
 
-Инструкции по очистке:
-1) Внимательно проанализируй весь текст.
-2) Удали весь "мусор":
-   - Навигационные элементы ('Описание', 'Похожие компании', 'Контакты', 'Арбитражные дела' и т.п.).
-   - Списки других компаний/организаций, если они не являются частью основного повествования.
-   - Повторяющиеся блоки реквизитов (ИНН, ОГРН, уставной капитал и т.д.) из длинных однотипных списков.
-   - Шаблонные оговорки общего характера (напр. про задержку публикации отчетности ФНС и т.п.).
-3) Сохрани только те абзацы и предложения, которые напрямую описывают объект/событие/компанию — главную тему текста.
-4) Не удаляй единичные идентификаторы (ИНН/ОГРН, даты регистрации, адрес), если они помогают однозначной идентификации объекта.
-5) При сомнении включать ли пограничный фрагмент — отдай приоритет сохранению, если вес источника ≥ 0.90 и фрагмент может быть полезен для последующего анализа.
-6) Объедини оставшийся контент в единый, гладкий и читаемый фрагмент без добавления новой информации.
+=== GOAL ===
+Return a single coherent Russian fragment that preserves only meaningful content directly related to the main subject
+of the document (company/object/event).
 
-Важно: верни ТОЛЬКО очищенный связный текст без заголовков, без метаданных и без упоминания веса.
-Сырой текст для очистки:
----
+=== CLEANING RULES (apply in order) ===
+1) Read the entire text carefully.
+2) Remove all "noise", including:
+   - Navigation/site chrome (e.g., "Описание", "Похожие компании", "Контакты", "Арбитражные дела", menus, breadcrumbs, headers/footers).
+   - Lists of other companies/organizations unless integral to the narrative about the main subject.
+   - Repetitive registry/boilerplate blocks (e.g., long repeating lines with ИНН/ОГРН/уставный капитал), generic disclaimers (e.g., FNS reporting delays).
+   - Ads, CTAs, widgets, pagination, cookie notices, filters, tag clouds, unrelated links.
+3) Keep only sentences/paragraphs that directly describe the main subject (company/object/event).
+4) Do NOT delete unique identifiers that help unambiguous identification (e.g., ИНН/ОГРН, registration dates, address) when they appear once or are essential.
+5) Borderline fragments: if usefulness is uncertain, PREFER KEEP when {source_weight} ≥ 0.90 **and** the fragment can support later analysis; otherwise DROP.
+6) Stitch the remaining content into ONE smooth, readable fragment:
+   - Preserve original meaning and factual wording; no new facts.
+   - Remove duplicates; collapse near-duplicates.
+   - Normalize whitespace and punctuation; keep original numbers and dates as-is (do not reformat).
+   - Do not add headings or commentary.
+
+=== VALIDATION BEFORE RETURN ===
+- Return EXACTLY one block of cleaned text in Russian.
+- No headings, no metadata, no mentions of domain/URL/weight.
+- No quotes or explanations; avoid list markers unless essential to readability of retained content.
+- If no relevant content remains → output exactly: "нет данных".
+
+=== RAW TEXT TO CLEAN ===
+{raw_text}
 """
 
-PROMPT_2_TEMPLATE = """
-Определи, содержит ли предоставленный текст информацию, связанную с запросом '{context_query}'.
-Если запрос связан с состоянием рынка или какой-то аналитикой - оставь, так же если в запросе просится предоставить что то на тему (рынок, конкуренты, тренды, регуляции) оставляй это и пиши одним словом 'да'
+PROMPT_2_TEMPLATE = r"""
+You are a senior risk analyst. Operate in STRICT extractive mode: use ONLY the provided text and metadata.
+Do NOT invent or infer facts.
 
-Метаданные источника:
-- Домен: {source_domain}
-- Вес источника (0–1): {source_weight}
+=== OUTPUT LANGUAGE ===
+- Russian only.
+
+=== TASK ===
+Answer with ONE word — either "да" or "нет" — indicating whether the text contains information relevant to the query "{context_query}".
+
+=== SPECIAL RULE (market/analytics) ===
+If the query asks for market state or analytics (e.g., рынок, конкуренты, тренды, регуляции), and the text contains such information relevant to "{context_query}", respond "да".
+
+=== RELEVANCE CRITERIA ===
+A) Direct relevance → "да":
+   - Direct mention of "{context_query}" or its official/legal/brand names (including transliterations and common abbreviations).
+   - Match on unique identifiers (ИНН/ОГРН/address/founders/beneficial owners), or explicit mentions of projects/divisions/brands owned by "{context_query}".
+B) Indirect relevance →
+   - If the connection is FACTUAL (partnerships, lawsuits, shared address/founder, group membership, participation in the same project) AND {source_weight} ≥ 0.90 → "да".
+   - If ONLY weak/tenuous overlaps (no explicit link) AND {source_weight} < 0.90 → "нет".
+C) No connection at all → "нет".
+
+=== TIME & SOURCE HANDLING ===
+- Use {date} only for context; classify relevance by content (do not reject solely due to recency).
+- Do not apply any weighting beyond rule B. No speculation.
+
+=== VALIDATION BEFORE RETURN ===
+- Output EXACTLY one lowercase word: "да" or "нет" (no quotes, no punctuation, no extra spaces).
+- No explanations or comments.
+
+=== METADATA ===
+- Source domain: {source_domain}
+- Source weight (0–1): {source_weight}
 - URL: {url}
-- Дата: {date}
+- Date: {date}
 
-Критерии релевантности (с учётом веса):
-A) Прямая релевантность → 'да':
-   - Прямое упоминание '{context_query}' или его официальных/юридических/брендовых наименований (включая транслитерации и распространённые сокращения),
-   - Совпадение уникальных идентификаторов (ИНН/ОГРН/адрес/учредители/бенефициары), явные упоминания проектов/подразделений/брендов, принадлежащих '{context_query}'.
-
-B) Косвенная релевантность (контекст/связи) → 
-   - Если связь подтверждается фактами (партнёрства, судебные дела, один адрес/учредитель, принадлежность к группе, участие в одном проекте) и вес источника ≥ 0.90, ответ 'да'.
-   - Если присутствуют ТОЛЬКО слабые/намёчные совпадения (без явной связи) и вес < 0.90, ответ 'нет'.
-
-C) Полное отсутствие связи → 'нет'.
-
-Ответь ОДНИМ СЛОВОМ на русском: 'да' или 'нет'.
-
-Текст для анализа:
----
+=== TEXT TO ANALYZE ===
 {text_content}
----
 """
 
-PROMPT_3_SUMMARIZE_CHUNK_TEMPLATE = """
-Ты — аналитик. Сформируй краткую, ёмкую выжимку по теме '{context_query}' из набора источников.
-Каждый источник передан в формате:
+PROMPT_3_SUMMARIZE_CHUNK_TEMPLATE = r"""
+You are a senior risk analyst. Operate in STRICT extractive mode: use ONLY the provided sources.
+Do NOT invent facts.
+
+=== OUTPUT LANGUAGE ===
+- Russian only.
+
+=== CONTEXT QUERY ===
+- Topic: "{context_query}"
+
+=== INPUT FORMAT ===
+Each source is provided as:
 [SRC:{{source_domain}} | W:{{source_weight}} | URL:{{url}} | DATE:{{date}}]
-<Текст>
+<Text>
 
-Задача:
-1) Выдели ключевые факты/события/цифры, убери воду.
-2) Сгруппируй дубли, объединяя формулировки.
-3) Для КАЖДОГО тезиса укажи метаданные поддержки:
-   - список доменов-источников и их веса в формате: [evidence: domain1(w=0.95); domain2(w=1.00)]
-   - вычисли поддерживающий вес тезиса: support = min(1.00, сумма весов уникальных источников, округли до 2 знаков).
-4) Если по одному факту есть конфликтующие версии — кратко отметь конфликт и отдай приоритет версии с бо́льшим суммарным support.
+=== TASK ===
+1) Extract key facts, events, and figures directly relevant to "{context_query}". Remove filler/noise.  
+2) Deduplicate: merge overlapping statements into one concise thesis.  
+3) For EACH thesis, attach metadata:  
+   - Evidence list of supporting domains with weights, format: [evidence: domain1(w=0.95); domain2(w=1.00)]  
+   - Compute thesis support = min(1.00, sum of unique source weights), round to 2 decimals.  
+4) If conflicting versions of the same fact exist:  
+   - Note briefly that a conflict exists.  
+   - Prefer the version with the higher aggregated support.  
 
-Выведи результат в виде маркированного списка тезисов. Каждый тезис оканчивай блоком:
-[evidence: ...] [support: 0.xx]
+=== OUTPUT FORMAT ===
+- Produce a bullet-point list of theses.  
+- Each thesis must END with two tags:  
+  [evidence: ...] [support: 0.xx]  
+- Example:  
+  • Компания увеличила выручку на 15% в 2024 году. [evidence: rbc.ru(w=0.95); kommersant.ru(w=0.85)] [support: 1.00]
 
-Источники (блоки) для анализа:
----
+=== VALIDATION BEFORE RETURN ===
+- No extra commentary.  
+- No invented facts.  
+- All supports ≤ 1.00.  
+- Output only bullet points in Russian.
+
+=== SOURCES TO ANALYZE ===
 {chunk_texts}
----
 """
 
-PROMPT_3_FINAL_SUMMARY_TEMPLATE = """
-Ты — экспертный аналитик. На основе всех промежуточных отчётов подготовь развернутую итоговую сводку по теме '{context_query}' с учётом весов источников.
+PROMPT_3_FINAL_SUMMARY_TEMPLATE = r"""
+You are a senior risk analyst. Operate in STRICT extractive mode: use ONLY the provided intermediate summaries.
+Do NOT invent facts.
 
-Инструкции:
-1) Синтезируй тезисы, объедини дубли, нормализуй формулировки.
-2) Для каждого итогового факта рассчитай агрегированный поддерживающий вес:
-   aggregated_support = min(1.00, сумма уникальных весов источников, подтвердивших факт). Округляй до 2 знаков.
-3) Конфликты:
-   - Явно отмечай расхождения.
-   - Выбирай основную версию по бо́льшему aggregated_support; при близких значениях используй дополнительный критерий — более свежая дата.
-4) Представь структуру отчёта:
-   - Ключевые выводы (5–10 пунктов) — укажи для каждого [support: 0.xx].
-   - Детализация по блокам (события, финансовое/правовое, партнёры/контрагенты, география/активы и т.п.) — с краткими фактами и их support.
-   - Риски и возможности — с кратким обоснованием и support.
-5) В конце добавь таблицу источников:
+=== OUTPUT LANGUAGE ===
+- Russian only.
 
-| Источник (домен) | URL | Вес (w) | Роль (подтверждение/уточнение/конфликт) | Кратко какие данные использованы |
-|---|---|---|---|---|
+=== CONTEXT QUERY ===
+- Topic: "{context_query}"
 
-6) Пиши чётко, по делу, аналитическим стилем. Язык — русский.
+=== TASK ===
+Prepare a comprehensive final summary report based on all intermediate summaries, with strict use of source weights.
 
-Промежуточные отчёты (с тезисами, evidence и support):
+=== RULES ===
+1) Synthesize theses:
+   - Merge duplicates, normalize wording, keep concise and factual.
+2) For each fact compute aggregated support:
+   - aggregated_support = min(1.00, sum of unique source weights confirming the fact), rounded to 2 decimals.
+3) Handle conflicts:
+   - Explicitly mark disagreements.
+   - Choose main version by higher aggregated_support; if close, prefer more recent date.
+4) Structure the report as follows:
+   - **Ключевые выводы (5–10 bullet points)** — each must end with [support: 0.xx].
+   - **Детализация по блокам** (e.g., события, финансовое/правовое, партнёры/контрагенты, география/активы, операционная деятельность) — short facts with support tags.
+   - **Риски и возможности** — concise justification with support tags.
+5) At the end include a Markdown table of sources:
+
+Дата| Источник (домен) | URL | Вес (w) | Роль (подтверждение/уточнение/конфликт) | Кратко какие данные использованы |
+|---|---|---|---|---|---|
+
+=== STYLE & RULES ===
+- Clear, business-analytical tone, no filler.
+- Russian output only.
+- No invented data; everything must be grounded in evidence and weights.
+- Each fact must show [support: 0.xx].
+
+=== INPUT ===
+Intermediate reports with theses, evidence, and support:
 ---
 {combined_summaries}
 ---
 """
-GEMINI_MODEL_1 = 'models/gemini-1.5-flash-latest'
-GEMINI_MODEL_2 = 'models/gemini-1.5-flash-latest'
+GEMINI_MODEL_1 = 'models/gemini-2.5-flash-lite'
+GEMINI_MODEL_2 = 'models/gemini-2.5-flash-lite'
 GEMINI_MODEL_3 = 'models/gemini-2.5-pro'
 
 
@@ -162,8 +225,9 @@ def clean_raw_data(input_file_path: str, output_file_path: str):
                 prompt = PROMPT_1.format(
                     source_domain=item.get('source', ''),
                     source_weight=item.get('weight', 0),
-                    url=item.get('url', '')
-                ) + "\n" + content_to_clean
+                    url=item.get('url', ''),
+                    raw_text=content_to_clean,
+                )
                 cleaned_text = call_to_gemini_api(prompt, GEMINI_MODEL_1)
 
                 item['cleaned_text'] = cleaned_text
@@ -284,7 +348,10 @@ def summarize_final_data(input_file_path: str, output_file_path: str, context_qu
                     txt=c.get('cleaned_text', '')
                 ) for c in chunk
             ])
-            prompt = PROMPT_3_SUMMARIZE_CHUNK_TEMPLATE.format(context_query=context_query, chunk_texts=chunk_texts)
+            prompt = PROMPT_3_SUMMARIZE_CHUNK_TEMPLATE.format(
+                context_query=context_query,
+                chunk_texts=chunk_texts
+            )
             logger.info(f"Обработка финального чанка из {len(chunk)} статей...")
             summary = call_to_gemini_api(prompt, GEMINI_MODEL_1)
             if summary:

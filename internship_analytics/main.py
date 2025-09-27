@@ -6,12 +6,13 @@ from typing import Any, Optional
 
 from dotenv import load_dotenv
 
-from conf import *
+from internship_analytics.conf import *
 from internship_analytics.modules.egrul_parser_json import run_egrul_parser_task
 from internship_analytics.modules.gemini_3_factor_process_data import run_gemini_processing_pipeline
 from internship_analytics.modules.market_digest import get_market_digest
 from internship_analytics.modules.news import run_full_search_and_parse
 from internship_analytics.modules.pandas_processor import *
+from internship_analytics.modules.request_to_gemini_api import call_to_gemini_api
 from modules.config.logger_config import get_logger
 from modules.merge_summary import fuse_summaries
 
@@ -205,8 +206,6 @@ def process_seo_news(ctx: CompanyContext) -> dict[str, Optional[str]]:
     )
 
 
-
-
 # =========================
 # ТОЧКА ВХОДА
 # =========================
@@ -266,15 +265,75 @@ def start_internship_analytics(target_inn: str) -> str:
     time.sleep(20)
 
     market_digest_path = ""
+    seed_text = None
     if company_seo_fused_path and os.path.exists(company_seo_fused_path):
-        with open(company_seo_fused_path, "r", encoding="utf-8") as f:
-            fused_text = f.read()
-        market_digest_path = get_market_digest(
-            fused_text,
-            domains=ctx.domains,
+        seed_text = open(company_seo_fused_path, "r", encoding="utf-8").read()
+    elif company_summary_path and os.path.exists(company_summary_path):
+        seed_text = open(company_summary_path, "r", encoding="utf-8").read()
+    elif seo_summary_path and os.path.exists(seo_summary_path):
+        seed_text = open(seo_summary_path, "r", encoding="utf-8").read()
+    else:
+        seed_text = json.dumps(ctx.egrul_json, ensure_ascii=False)
+
+    if seed_text:
+        market_digest_path = get_market_digest(seed_text, domains=ctx.domains)
+
+    time.sleep(20)
+
+    # ---------- FINAL SUMMARY ----------
+    final_summary_path = os.path.join(FINAL_REPORTS_OUTPUT_DIR, f"{ctx.inn}_final_summary.md")
+
+    with open(csv_company_seo_fused_path, "r", encoding="utf-8") as f:
+        base_summary_text = f.read().strip()
+
+    market_digest_text: str = ""
+    try:
+        if market_digest_path and os.path.exists(market_digest_path):
+            with open(market_digest_path, "r", encoding="utf-8") as mf:
+                market_digest_text = mf.read().strip()
+        else:
+            if isinstance(market_digest_path, str):
+                market_digest_text = market_digest_path.strip()
+    except Exception as e:
+        logger.warning(f"Не удалось прочитать market_digest: {e}")
+
+    final_prompt = f"""
+    {FINAL_REPORT_PROMPT_TEMPLATE_V2.format(
+        generation_date=datetime.now().strftime("%d.%m.%Y"),
+    )}
+
+
+    БАЗОВОЕ САММАРИ (СОХРАНИТЬ ФОРМАТ):
+    ----------------------------------------
+    {base_summary_text}
+    ----------------------------------------
+
+    МАРКЕТ-ДАЙДЖЕСТ (ИСТОЧНИК ДЛЯ ДОПОЛНЕНИЯ):
+    ----------------------------------------
+    {market_digest_text}
+    ----------------------------------------
+    """
+
+    # вызов Gemini; гибкая попытка на случай другой сигнатуры
+    try:
+        final_summary_text = call_to_gemini_api(
+            prompt=final_prompt,
+            model="models/gemini-2.5-pro",
+            max_output_tokens=8000,
+            temperature=0.2,
+        )
+    except TypeError:
+        final_summary_text = call_to_gemini_api(
+            final_prompt,
+            model="models/gemini-2.5-pro",
+            max_output_tokens=4000,
+            temperature=0.2,
         )
 
+    with open(final_summary_path, "w", encoding="utf-8") as f:
+        f.write(final_summary_text if isinstance(final_summary_text, str) else str(final_summary_text))
 
+    logger.info(f"Финальное саммари сохранено: {final_summary_path}")
 
     result = {
         "inn": ctx.inn,
@@ -287,10 +346,11 @@ def start_internship_analytics(target_inn: str) -> str:
         "seo_news": seo_news,
         "final_fused_summary_path": company_seo_fused_path,
         "csv_fused_summary_path": csv_company_seo_fused_path,
-        "market_digest_path": market_digest_path
+        "market_digest_path": market_digest_path,
+        "final_summary_path": final_summary_path
     }
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 if __name__ == "__main__":
-    print(start_internship_analytics(str(9709086205)))
+    print(start_internship_analytics(str(7716902370)))

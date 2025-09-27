@@ -8,20 +8,32 @@ from .request_to_gemini_api import call_to_gemini_api
 
 logger = get_logger("market_digest")
 
-PROMPT_MARKET_DIGEST_NEWS = """
-Ты — senior аналитик-эксперт. У тебя есть итоговая сводка по компании.
-Твоя задача — подготовить КОРОТКИЙ поисковый запрос (6–12 слов), 
-чтобы найти свежие новости о состоянии рынка этой компании, её конкурентах, трендах и регуляторных изменениях.
+PROMPT_MARKET_DIGEST_NEWS = r"""
+You are a senior risk analyst. Operate in STRICT extractive mode: use ONLY the provided company summary.  
+Do NOT invent facts.
 
-Требования:
-- Верни РОВНО одну строку (без кавычек и пояснений).
-- Укажи год «2024» или «2025» для свежести.
-- Если город есть в сводке, упомяни его, если нет — пропусти.
-- Не выдумывай фактов, опирайся на сводку.
----
+=== OUTPUT LANGUAGE ===
+- Russian only.
 
-Сводка компании:
-{company_summary}
+=== GOAL ===
+Generate ONE short search query (6–12 words) in Russian to find the latest news about:  
+- the company’s market situation,  
+- competitors,  
+- trends,  
+- regulatory changes.  
+
+=== RULES ===
+- Return EXACTLY one line, without quotes or explanations.  
+- Must include year: “2024” or “2025”.  
+- If the city is mentioned in the summary → include it. If not → skip.  
+- Do NOT add facts not present in the summary.  
+
+At the end include a Markdown table of sources:
+Дата| Источник (домен) | URL | Вес (w) | Роль (подтверждение/уточнение/конфликт) | Кратко какие данные использованы |
+|---|---|---|---|---|---|
+
+=== INPUT ===
+Company summary: {company_summary}
 """
 
 
@@ -35,7 +47,7 @@ def _sanitize_query_line(q: str) -> str:
 def generate_market_query_one(
         company_summary_text: str,
         *,
-        model: str = "models/gemini-1.5-flash-latest",
+        model: str = "models/gemini-2.5-flash-lite",
         max_output_tokens: int = 60,
 ) -> str:
     if not company_summary_text or not company_summary_text.strip():

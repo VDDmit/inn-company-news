@@ -53,101 +53,106 @@ for d in [
     PYDOLL_SCRAPED_DATA_DIR,
     COMPANY_NEWS_OUTPUT_DIR,
     SEO_NEWS_OUTPUT_DIR,
+    MARKET_NEWS_OUTPUT_DIR
 ]:
     os.makedirs(d, exist_ok=True)
 
-FINAL_REPORT_PROMPT_TEMPLATE = """
-ТЫ — первоклассный риск-аналитик, готовящий одностраничный отчет (one-pager) для инвестиционного комитета.
-Твоя задача — синтезировать всю предоставленную информацию в четкий, структурированный и лаконичный отчет в формате Markdown.
-Стиль отчета — деловой, объективный, основанный на фактах.
+FINAL_REPORT_PROMPT_TEMPLATE_V2 = r"""
+You are a senior risk analyst. Operate in STRICT extractive mode:
+use ONLY the structured inputs provided. Do NOT invent facts.
+If any field is missing, output “нет данных”.
 
-**СТРОГО СЛЕДУЙ ЗАДАННОЙ СТРУКТУРЕ И ФОРМАТИРОВАНИЮ.**
+Goal: Produce a one-page Markdown report in Russian that EXACTLY follows
+the structure and headings of the sample “отчет_v2”. Keep it concise and factual.
 
-# {company_name}
-**Одностраничный отчёт — {legal_name}**
-**ИНН {inn} · ОКВЭД {okved_code} ({okved_name}) · Гендиректор {ceo_name}** (по состоянию на дату выписки ЕГРЮЛ); {ceo_news}. (Источники: ЕГРЮЛ, {news_sources_for_header})
+=== OUTPUT LANGUAGE ===
+- Russian only.
 
-| Корзина: {verdict} |
-| :--- |
-| **Окно анализа:** 365 дней · **Сгенерировано:** {generation_date} |
+=== TIME WINDOW ===
+- 365 days ending on {generation_date} (inclusive).
+- Use DD.MM.YYYY for dates in evidence.
 
-## Top-line
-{top_line_summary} (Источники: {top_line_sources})
+=== SECTION ORDER AND EXACT HEADINGS (no extra sections) ===
+1) Title block (two lines)
+   Line 1: Одностраничный отчёт — {{legal_name}}
+   Line 2: (бренд «{{brand_name}}»)
 
-### 3 причины (MECE)
-1.  **{reason_1_title}**. {reason_1_description} (Источники: {reason_1_sources})
-2.  **{reason_2_title}**. {reason_2_description} (Источники: {reason_2_sources})
-3.  **{reason_3_title}**. {reason_3_description} (Источники: {reason_3_sources})
+3) Корзина / окно анализа (two lines)
+   Line 3: Корзина: {{verdict}}            # one of: Avoid / Monitor / Accept
+   Line 4: Окно анализа: 365 дней · Сгенерировано: {generation_date}
 
-### Позитивные сигналы (если есть)
-{positive_signals}
+5) Top-line
+   Heading: Top-line
+   Content: 2–3 short sentences. Start with the verdict word if helpful (e.g., “Avoid:”).
+   Base ONLY on the supplied inputs ({{top_line_summary}}; cite key outlets inline in parentheses).
 
-### Ключевые метрики (12 мес)
-| Метрика | Значение | Примечание |
-| :--- | :--- | :--- |
-| Упоминаний | {mentions_trend} | {mentions_note} |
-| Медианный тон | {median_tone} | {tone_note} |
-| Тяжёлые события | {hard_events_count} | {hard_events_note} |
-| **Risk Score (итог)** | **{risk_score}** | **{risk_score_note}** |
+6) 2 причины (MECE)
+   Heading: 2 причины (MECE)
 
-### Что дальше (мониторинг)
-- {monitoring_point_1}
-- {monitoring_point_2}
-- {monitoring_point_3}
+   # Sub-block MUST appear exactly as below (three lines):
+   Оценка индустрии (важность бренда)
+   Индустрия: {{industry_line}}
+   Важность бренда для потребителей: {{brand_importance_score}}/10 — {{brand_importance_rationale}}
 
-### Доказательства (источники)
-| ID | Дата | Заголовок/суть | Источник | Вес домена* |
-| :--- | :--- | :--- | :--- | :--- |
-{evidence_table}
+   Then a numbered list of exactly two items:
+     1. {{reason_1_title}}. {{reason_1_description}} (Источники: {{reason_1_sources}})
+     2. {{reason_2_title}}. {{reason_2_description}} (Источники: {{reason_2_sources}})
 
----
-*Веса доменов — ориентиры из политики источников; международные/нишевые не нормированы.
-*Примечание: Финансовые показатели из внутренней системы не были включены в данный отчет, сфокусированный на репутационных и операционных рисках.
+   Then one line with a deterministic binary decision (NO “Зависит” allowed):
+     Инвестировал бы? {{invest_decision_optional_stage}} — {{invest_rationale}}
 
-**ИСХОДНЫЕ ДАННЫЕ ДЛЯ АНАЛИЗА:**
+7) Risk Score — коротко, «по-бизнесу»
+   Heading: Risk Score — коротко, «по-бизнесу»
+   Что это: единый индикатор новостного/регуляторного риска за год. Смотрим на тяжесть событий, свежесть и качество источников.
+   Итог по компании: {{risk_score}} — {{risk_score_business_interp}} ({{event_age_phrase}}).
+   Как читать решение: у нас действует правило «событие класса максимальной тяжести ⇒ Avoid» — даже если итоговый балл умеренный. Поэтому статус {{verdict}} сохраняется, пока {{resolution_condition}}.
 
-**1. Данные из ЕГРЮЛ:**
-{egrul_data}
+   Ключевые метрики (12 мес)
+   Heading: Ключевые метрики (12 мес), которые ты можешь сам вывести исходя только из данных которые я тебе дал (нет данных старайся не писать) 
+   Формат таблицы (строго такой):
+   
+   | Метрика | Значение | Примечание |
+   |---|---|---|
+   | Упоминаний | {{mentions_trend}} | {{mentions_note}} |
+   | Медианный тон | {{median_tone}} | {{tone_note}} |
+   | Тяжёлые события | {{hard_events_count}} | {{hard_events_note}} |
+   | Risk Score (итог) | {{risk_score}} | {{risk_score_note}} |
 
-**2. Ключевые финансовые показатели (из CSV):**
-{financial_data}
+9) Доказательства (источники)
+   Heading: Доказательства (источники)
+   | Дата | Заголовок/суть | Источник |
+   {{evidence_items}}
 
-**3. Сводка новостей и событий (результат предварительного анализа):**
-{news_summary}
-
-**4. Список релевантных статей (для таблицы доказательств):**
-{relevant_articles_list}
-
-**5. Политика весов доменов:**
-{domain_weights_policy}
-
-**ТВОЯ ЗАДАЧА — ЗАПОЛНИТЬ ШАБЛОН ВЫШЕ, ИСПОЛЬЗУЯ ПРЕДОСТАВЛЕННЫЕ ИСХОДНЫЕ ДАННЫЕ.**
-- **Вердикт (Корзина):** 'Avoid', 'Monitor', 'Accept'. Выбери на основе тяжести рисков.
-- **Top-line:** Краткая (2-3 предложения) выжимка главной причины вердикта.
-- **3 причины (MECE):** Разбей Top-line на три взаимоисключающих, исчерпывающих фактора.
-- **Ключевые метрики:** Сделай выводы на основе новостной сводки. Например, "всплеск из-за инцидента", "доминируют негативные сюжеты", "≥1".
-- **Таблица доказательств:** Выбери 5-8 самых важных событий из списка релевантных статей. Укажи дату, краткую суть, название источника и вес домена из политики. Если домена нет в политике, ставь "—".
-- **Источники:** Для каждого утверждения указывай в скобках ключевые СМИ, подтверждающие информацию (например, "РБК, Коммерсантъ").
-- **CEO News:** Если в новостях есть информация о смене CEO, которая отличается от ЕГРЮЛ, кратко упомяни это.
-- **Не выдумывай информацию.** Весь твой ответ должен строго базироваться на предоставленных исходных данных.
-- **Результат верни в виде чистого Markdown, без дополнительных комментариев.**
+10) Three explanatory paragraphs:
+   - Что это: ...
+   - Итог по компании: {{risk_score}} ...
+   - Как читать решение: ...
 """
 
-PROMPT_MARKET_DIGEST_NEWS = """
-Ты — senior аналитик-эксперт. Тебе дана итоговая сводка по компании (ниже).
-Нужно подготовить КОРОТКИЕ браузерные поисковые запросы на русском, чтобы найти свежие новости
-о состоянии рынка этой компании, её конкурентах, а также отраслевые тренды и регуляторные изменения.
+PROMPT_MARKET_DIGEST_NEWS_V2 = r"""
+You are a senior risk analyst. Operate in STRICT extractive mode: use ONLY the provided company summary.  
+Do NOT invent facts.
 
-Требования к запросам:
-- Верни РОВНО 1 варианта как текст, который я вставлю в поисковик
-- Запрос 6–12 слов
-- По возможности включай: отрасль/рынок, конкуренты/игроки, географию (город или регион), ключевые события (кризис, санкции, господдержка, тендеры и т.п.), год или «2024»/«2025» для свежести.
-- Не используй операторы site:, кавычки, и/или сложные логические конструкции. Нужна естественная формулировка.
-- Если город отсутствует, опусти его.
-- Не выдумывай факты — ориентируйся на сводку.
+=== OUTPUT LANGUAGE ===
+- Russian only.
 
-Итоговая сводка компании:
----
+=== TASK ===
+Generate ONE short natural-language browser search query in Russian to find the latest news about:
+- the company’s market situation,
+- its competitors,
+- industry trends,
+- regulatory changes.
+
+=== REQUIREMENTS ===
+- Output EXACTLY one query string (no explanations, no quotes).
+- Query length: 6–12 words.
+- Preferably include: industry/market, competitors/players, geography (city or region if present), key events (e.g., кризис, санкции, господдержка, тендеры).
+- Must include year: "2024" or "2025" for freshness.
+- Do NOT use operators (e.g., site:), quotes, or Boolean logic.
+- If city is missing in the summary → skip it.
+- Do NOT invent facts — base only on the summary.
+
+=== INPUT ===
+Company summary:
 {company_summary}
----
 """
