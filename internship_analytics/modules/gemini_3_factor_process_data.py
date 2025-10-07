@@ -95,91 +95,103 @@ C) No connection at all → "нет".
 """
 
 PROMPT_3_SUMMARIZE_CHUNK_TEMPLATE = r"""
-You are a senior risk analyst. Operate in STRICT extractive mode: use ONLY the provided sources.
-Do NOT invent facts.
+You are a non-creative data processor. Your function is to perform 100% extractive processing.
+You are strictly forbidden from interpreting, inferring, or adding any information not explicitly present in the sources. ZERO creativity is allowed.
+
+=== CORE DIRECTIVE ===
+- Operate in an EXTREMELY STRICT extractive mode. Every single word in your output MUST be directly traceable to the provided sources.
 
 === OUTPUT LANGUAGE ===
 - Russian only.
 
 === CONTEXT QUERY ===
-- Topic: "{context_query}"
+- Process facts related to: "{context_query}"
 
 === INPUT FORMAT ===
 Each source is provided as:
 [SRC:{{source_domain}} | W:{{source_weight}} | URL:{{url}} | DATE:{{date}}]
 <Text>
 
-=== TASK ===
-1) Extract key facts, events, and figures directly relevant to "{context_query}". Remove filler/noise.  
-2) Deduplicate: merge overlapping statements into one concise thesis.  
-3) For EACH thesis, attach metadata:  
-   - Evidence list of supporting domains with weights, format: [evidence: domain1(w=0.95); domain2(w=1.00)]  
-   - Compute thesis support = min(1.00, sum of unique source weights), round to 2 decimals.  
-4) If conflicting versions of the same fact exist:  
-   - Note briefly that a conflict exists.  
-   - Prefer the version with the higher aggregated support.  
+=== MANDATORY TASK SEQUENCE ===
+1) SCAN sources for facts, figures, and events that directly match the context query "{context_query}".
+2) EXTRACT VERBATIM or with minimal, structurally necessary paraphrasing. Discard all filler, opinions, and promotional language.
+3) CONSOLIDATE identical or near-identical facts from different sources into a single thesis. When merging, use the most direct and data-rich phrasing available in the sources.
+4) ATTACH METADATA to EACH thesis without exception:
+   - Evidence list: A list of supporting domains with their weights. Format: [evidence: domain1(w=0.95); domain2(w=1.00)]
+   - Support score: Calculate as min(1.00, sum of unique source weights). Format: [support: 0.xx]
+5) HANDLE CONFLICTS: If sources provide conflicting versions of a fact:
+   - State the conflicting versions as separate theses.
+   - The thesis with higher aggregated support is considered the primary version.
 
 === OUTPUT FORMAT ===
-- Produce a bullet-point list of theses.  
-- Each thesis must END with two tags:  
-  [evidence: ...] [support: 0.xx]  
-- Example:  
-  • Компания увеличила выручку на 15% в 2024 году. [evidence: rbc.ru(w=0.95); kommersant.ru(w=0.85)] [support: 1.00]
+- The output MUST ONLY be a bullet-point list of theses.
+- Each thesis MUST end with two tags: [evidence: ...] [support: 0.xx]
+- Example:
+  • Компания X получила кредит в размере 500 млн рублей. [evidence: rbc.ru(w=0.95); vedomosti.ru(w=1.00)] [support: 1.00]
 
-=== VALIDATION BEFORE RETURN ===
-- No extra commentary.  
-- No invented facts.  
-- All supports ≤ 1.00.  
-- Output only bullet points in Russian.
+=== CRITICAL VALIDATION BEFORE RESPONSE ===
+- Is the output free of ANY introductory or concluding text? YES.
+- Is every fact directly quoted or minimally paraphrased from a source? YES.
+- Does every bullet point have BOTH the [evidence: ...] and [support: ...] tags? YES.
+- Is every URL from the input sources correctly associated with its data? YES.
 
-=== SOURCES TO ANALYZE ===
+=== SOURCES TO PROCESS ===
 {chunk_texts}
 """
 
 PROMPT_3_FINAL_SUMMARY_TEMPLATE = r"""
-You are a senior risk analyst. Operate in STRICT extractive mode: use ONLY the provided intermediate summaries.
-Do NOT invent facts.
+You are an automated report assembly system. Your only function is to assemble a final report from pre-processed data chunks.
+You MUST NOT perform any creative writing, interpretation, or analysis. Your output is based SOLELY on the provided intermediate summaries.
+
+=== CORE DIRECTIVE ===
+- Operate in a STRICTLY mechanical, assembly-line mode.
+- It is forbidden to invent, infer, or embellish any information. Every statement must be justified by the input.
 
 === OUTPUT LANGUAGE ===
 - Russian only.
 
 === CONTEXT QUERY ===
-- Topic: "{context_query}"
+- Final report for topic: "{context_query}"
 
-=== TASK ===
-Prepare a comprehensive final summary report based on all intermediate summaries, with strict use of source weights.
+=== MANDATORY ASSEMBLY RULES ===
+1) THESIS CONSOLIDATION:
+   - Systematically scan all theses from the intermediate reports.
+   - Merge 100% identical theses. For closely related theses, combine them into a single, data-driven statement, strictly using the phrasing from the inputs.
+2. AGGREGATED SUPPORT CALCULATION:
+   - For each consolidated fact, calculate the final aggregated_support = min(1.00, sum of all unique source weights confirming the fact), rounded to 2 decimals.
+3. CONFLICT HANDLING:
+   - If conflicting theses exist, explicitly mark them. Present the version with the highest aggregated_support as the main fact.
+4. REPORT STRUCTURE (Apply mechanically):
+   - **Ключевые выводы (5–10 bullet points):** Select the most significant, high-support theses. Each must end with [support: 0.xx].
+   - **Детализация по блокам:** Categorize all remaining theses.
+     - **CRITICAL RULE FOR CATEGORIZATION:** A thesis can only be placed in a specific section (e.g., "Риски и возможности") if the source text for that thesis explicitly uses keywords related to that category (e.g., 'риск', 'угроза', 'проблема', 'возможность', 'перспектива'). If no such keyword is present, place the fact in a general block like 'Операционная деятельность' or 'Финансовые показатели'. DO NOT INFER THE CATEGORY.
+   - **Таблица источников:** Generate a Markdown table at the end of the report.
 
-=== RULES ===
-1) Synthesize theses:
-   - Merge duplicates, normalize wording, keep concise and factual.
-2) For each fact compute aggregated support:
-   - aggregated_support = min(1.00, sum of unique source weights confirming the fact), rounded to 2 decimals.
-3) Handle conflicts:
-   - Explicitly mark disagreements.
-   - Choose main version by higher aggregated_support; if close, prefer more recent date.
-4) Structure the report as follows:
-   - **Ключевые выводы (5–10 bullet points)** — each must end with [support: 0.xx].
-   - **Детализация по блокам** (e.g., события, финансовое/правовое, партнёры/контрагенты, география/активы, операционная деятельность) — short facts with support tags.
-   - **Риски и возможности** — concise justification with support tags.
-5) At the end include a Markdown table of sources:
+=== SOURCE TABLE GENERATION (Strict procedure) ===
+For the final source table, you MUST:
+a) List every unique source URL present in the evidence tags of all processed theses.
+b) For the "Роль" column, write 'подтверждение' if the source supported a fact, 'уточнение' if it added a detail to an existing fact, or 'конфликт' if it supported a fact involved in a noted conflict.
+c) For the "Кратко какие данные использованы" column, you MUST copy-paste the exact final thesis (or theses) that this source's evidence supports. DO NOT SUMMARIZE.
 
-Дата| Источник (домен) | URL | Вес (w) | Роль (подтверждение/уточнение/конфликт) | Кратко какие данные использованы |
+| Дата| Источник (домен) | URL | Вес (w) | Роль (подтверждение/уточнение/конфликт) | Кратко какие данные использованы |
 |---|---|---|---|---|---|
 
-=== STYLE & RULES ===
-- Clear, business-analytical tone, no filler.
-- Russian output only.
-- No invented data; everything must be grounded in evidence and weights.
-- Each fact must show [support: 0.xx].
+=== FORBIDDEN ACTIONS ===
+- Writing introductions, conclusions, or transitional sentences.
+- Using synonyms not present in the source text.
+- Inferring cause and effect unless explicitly stated.
+- Adding any commentary, opinion, or "analyst insight".
+- Generating a report if the input data is empty.
 
-=== INPUT ===
-Intermediate reports with theses, evidence, and support:
+=== INPUT: INTERMEDIATE SUMMARIES ===
 ---
 {combined_summaries}
 ---
 """
-GEMINI_MODEL_1 = 'models/gemini-2.5-flash-lite'
-GEMINI_MODEL_2 = 'models/gemini-2.5-flash-lite'
+# GEMINI_MODEL_1 = 'models/gemini-2.5-flash-lite'
+# GEMINI_MODEL_2 = 'models/gemini-2.5-flash-lite'
+GEMINI_MODEL_1 = 'models/gemini-2.0-flash-lite'
+GEMINI_MODEL_2 = 'models/gemini-2.0-flash-lite'
 GEMINI_MODEL_3 = 'models/gemini-2.5-pro'
 
 

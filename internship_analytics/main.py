@@ -1,15 +1,18 @@
 import re
 import tempfile
 import time
-from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Optional
 
 from dotenv import load_dotenv
 
 from internship_analytics.conf import *
+from internship_analytics.context import CompanyContext
 from internship_analytics.modules.egrul_parser_json import run_egrul_parser_task
 from internship_analytics.modules.gemini_3_factor_process_data import run_gemini_processing_pipeline
-from internship_analytics.modules.market_digest import get_market_digest
+from internship_analytics.modules.market_digest import (
+    get_market_digest,
+    generate_market_query_one,
+)
 from internship_analytics.modules.news import run_full_search_and_parse
 from internship_analytics.modules.pandas_processor import *
 from internship_analytics.modules.request_to_gemini_api import call_to_gemini_api
@@ -18,6 +21,12 @@ from modules.merge_summary import fuse_summaries
 
 load_dotenv()
 logger = get_logger("main")
+
+CUMULATIVE_SUMMARY_FILENAME = "all_final_summaries.md"
+SECTION_SEPARATOR = "\n\n---\n\n"
+
+# Мини-дайджест рынка — отдельный каталог
+COMPANY_SEARCH_MINI_DIGEST_OUTPUT_DIR = os.path.join(RUN_DIR, "search_api_mini_digest")
 
 
 # =========================
@@ -72,29 +81,6 @@ def validity_inn_check(target_inn: str) -> str:
     except Exception as e:
         logger.exception(f"Непредвиденная ошибка при проверке ИНН '{target_inn}': {e}")
         return "ИНН невалиден: Внутренняя ошибка системы"
-
-
-# =========================
-# КОНТЕКСТ КОМПАНИИ
-# =========================
-
-@dataclass
-class CompanyContext:
-    inn: str
-    egrul_json: dict[str, Any]
-    csv_json: Any
-    company_full_name: str
-    seo_full_name: str
-    city: Optional[str]
-
-    @property
-    def domains(self) -> list[str]:
-        # те же домены, что и в DOMAIN_WEIGHTS
-        return list(DOMAIN_WEIGHTS.keys())
-
-
-# Глобально доступный текущий контекст (по желанию)
-CURRENT_CONTEXT: Optional[CompanyContext] = None
 
 
 def collect_company_context(valid_inn: str) -> CompanyContext:
@@ -206,6 +192,28 @@ def process_seo_news(ctx: CompanyContext) -> dict[str, Optional[str]]:
     )
 
 
+def append_final_summary_to_cumulative(ctx: CompanyContext, final_summary_text: str) -> str:
+    os.makedirs(BASE_OUTPUT_DIR, exist_ok=True)
+    cumulative_path = os.path.join(BASE_OUTPUT_DIR, CUMULATIVE_SUMMARY_FILENAME)
+
+    header = (
+        f"{SECTION_SEPARATOR}"
+        f"# Итоговое саммари — {ctx.company_full_name}\n"
+        f"**ИНН:** {ctx.inn}  \n"
+        f"**Руководитель:** {ctx.seo_full_name or '—'}  \n"
+        f"**Город:** {ctx.city or '—'}  \n"
+        f"**Сгенерировано:** {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}\n"
+        f"{SECTION_SEPARATOR}"
+    )
+
+    with open(cumulative_path, "a", encoding="utf-8") as f:
+        f.write(header)
+        f.write(final_summary_text if isinstance(final_summary_text, str) else str(final_summary_text))
+        f.write(SECTION_SEPARATOR)
+
+    return cumulative_path
+
+
 # =========================
 # ТОЧКА ВХОДА
 # =========================
@@ -219,7 +227,7 @@ def start_internship_analytics(target_inn: str) -> str:
 
     ctx = collect_company_context(valid_inn)
 
-    # Новости
+    # Новости (компания и руководитель)
     company_news = process_company_news(ctx)
     seo_news = process_seo_news(ctx)
 
@@ -243,7 +251,7 @@ def start_internship_analytics(target_inn: str) -> str:
         max_output_tokens=10000,
     )
 
-    time.sleep(20)
+    time.sleep(30)
 
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8") as tmp:
         json.dump(ctx.csv_json, tmp, ensure_ascii=False, indent=2)
@@ -262,10 +270,14 @@ def start_internship_analytics(target_inn: str) -> str:
         max_output_tokens=10000,
     )
 
-    time.sleep(20)
+    time.sleep(30)
 
+    # ---------- MARKET DIGEST (полный и мини) ----------
     market_digest_path = ""
+    market_mini_digest_path = ""
+    market_query = ""
     seed_text = None
+
     if company_seo_fused_path and os.path.exists(company_seo_fused_path):
         seed_text = open(company_seo_fused_path, "r", encoding="utf-8").read()
     elif company_summary_path and os.path.exists(company_summary_path):
@@ -276,9 +288,33 @@ def start_internship_analytics(target_inn: str) -> str:
         seed_text = json.dumps(ctx.egrul_json, ensure_ascii=False)
 
     if seed_text:
+        # 1) Генерируем короткий запрос по рынку (использует re и правила из генератора)
+        market_query = generate_market_query_one(seed_text)
+        logger.info(f"[market-mini] Короткий запрос: {market_query!r}")
+
+        # 2) Полный рыночный дайджест
         market_digest_path = get_market_digest(seed_text, domains=ctx.domains)
 
-    time.sleep(20)
+        # 3) Мини-дайджест рынка (узкий сбор 1 страницы)
+        try:
+            os.makedirs(COMPANY_SEARCH_MINI_DIGEST_OUTPUT_DIR, exist_ok=True)
+            mini_raw_path = run_full_search_and_parse(
+                user_search_query=market_query or seed_text[:120],
+                domains_to_search=list(ctx.domains),
+                num_pages=1,
+                path_to_output=COMPANY_SEARCH_MINI_DIGEST_OUTPUT_DIR,
+            )
+            if mini_raw_path:
+                market_mini_digest_path = run_gemini_processing_pipeline(
+                    raw_json_file_path=mini_raw_path,
+                    context_query=market_query or ctx.company_full_name,
+                    processed_data_dir=COMPANY_SEARCH_MINI_DIGEST_OUTPUT_DIR,
+                ) or ""
+                logger.info(f"[market-mini] Готово: {market_mini_digest_path}")
+        except Exception as e:
+            logger.warning(f"[market-mini] Ошибка мини-дайджеста: {e}")
+
+    time.sleep(30)
 
     # ---------- FINAL SUMMARY ----------
     final_summary_path = os.path.join(FINAL_REPORTS_OUTPUT_DIR, f"{ctx.inn}_final_summary.md")
@@ -287,6 +323,7 @@ def start_internship_analytics(target_inn: str) -> str:
         base_summary_text = f.read().strip()
 
     market_digest_text: str = ""
+    market_mini_digest_text: str = ""
     try:
         if market_digest_path and os.path.exists(market_digest_path):
             with open(market_digest_path, "r", encoding="utf-8") as mf:
@@ -294,46 +331,56 @@ def start_internship_analytics(target_inn: str) -> str:
         else:
             if isinstance(market_digest_path, str):
                 market_digest_text = market_digest_path.strip()
+
+        if market_mini_digest_path and os.path.exists(market_mini_digest_path):
+            with open(market_mini_digest_path, "r", encoding="utf-8") as mmf:
+                market_mini_digest_text = mmf.read().strip()
     except Exception as e:
-        logger.warning(f"Не удалось прочитать market_digest: {e}")
+        logger.warning(f"Не удалось прочитать market_digest/mini: {e}")
 
     final_prompt = f"""
-    {FINAL_REPORT_PROMPT_TEMPLATE_V2.format(
+[SOURCE 1: BASE SUMMARY]
+----------------------------------------
+{base_summary_text}
+----------------------------------------
+
+[SOURCE 2: MARKET DIGEST (SUPPLEMENTARY)]
+----------------------------------------
+{market_digest_text}
+----------------------------------------
+
+[SOURCE 2B: MARKET MINI-DIGEST (SUPPLEMENTARY)]
+----------------------------------------
+{market_mini_digest_text}
+----------------------------------------
+
+{FINAL_REPORT_PROMPT_TEMPLATE_V2.format(
         generation_date=datetime.now().strftime("%d.%m.%Y"),
     )}
-
-
-    БАЗОВОЕ САММАРИ (СОХРАНИТЬ ФОРМАТ):
-    ----------------------------------------
-    {base_summary_text}
-    ----------------------------------------
-
-    МАРКЕТ-ДАЙДЖЕСТ (ИСТОЧНИК ДЛЯ ДОПОЛНЕНИЯ):
-    ----------------------------------------
-    {market_digest_text}
-    ----------------------------------------
-    """
-
+"""
+    time.sleep(30)
     # вызов Gemini; гибкая попытка на случай другой сигнатуры
     try:
         final_summary_text = call_to_gemini_api(
             prompt=final_prompt,
             model="models/gemini-2.5-pro",
-            max_output_tokens=8000,
-            temperature=0.2,
         )
     except TypeError:
         final_summary_text = call_to_gemini_api(
             final_prompt,
             model="models/gemini-2.5-pro",
-            max_output_tokens=4000,
-            temperature=0.2,
         )
 
     with open(final_summary_path, "w", encoding="utf-8") as f:
         f.write(final_summary_text if isinstance(final_summary_text, str) else str(final_summary_text))
 
     logger.info(f"Финальное саммари сохранено: {final_summary_path}")
+
+    cumulative_summary_path = append_final_summary_to_cumulative(
+        ctx,
+        final_summary_text if isinstance(final_summary_text, str) else str(final_summary_text)
+    )
+    logger.info(f"Финальное саммари добавлено в общий файл: {cumulative_summary_path}")
 
     result = {
         "inn": ctx.inn,
@@ -346,11 +393,14 @@ def start_internship_analytics(target_inn: str) -> str:
         "seo_news": seo_news,
         "final_fused_summary_path": company_seo_fused_path,
         "csv_fused_summary_path": csv_company_seo_fused_path,
+        "market_query": market_query,
         "market_digest_path": market_digest_path,
-        "final_summary_path": final_summary_path
+        "market_mini_digest_path": market_mini_digest_path,
+        "final_summary_path": final_summary_path,
+        "cumulative_summary_path": cumulative_summary_path
     }
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 if __name__ == "__main__":
-    print(start_internship_analytics(str(7716902370)))
+    print(start_internship_analytics(str(6670514411)))

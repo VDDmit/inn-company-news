@@ -2,33 +2,34 @@ import re
 from datetime import datetime
 from typing import Optional, Sequence
 
-from internship_analytics.conf import DOMAIN_WEIGHTS, MARKET_NEWS_OUTPUT_DIR, PAGES_TO_SEARCH_MARKET
+from internship_analytics.conf import COMPANY_NEWS_OUTPUT_DIR # Предполагаем, что есть такая константа
 from .config.logger_config import get_logger
 from .gemini_3_factor_process_data import run_gemini_processing_pipeline
 from .news import run_full_search_and_parse
 from .request_to_gemini_api import call_to_gemini_api
 
-logger = get_logger("market_digest")
+logger = get_logger("company_digest")
 
-PROMPT_MARKET_DIGEST_NEWS = r"""
-You are a senior risk analyst. Operate in STRICT extractive mode: use ONLY the provided company summary.
+PROMPT_COMPANY_DIGEST_NEWS = r"""
+You are a senior analyst. Operate in STRICT extractive mode: use ONLY the provided company summary.
 Do NOT invent facts.
 
 === OUTPUT LANGUAGE ===
 - Russian only.
 
 === GOAL ===
-Generate ONE short search query (6–12 words, Russian) to find the latest news about the COMPANY'S MARKET:
-- market situation / demand / pricing,
-- competitors and rivalry,
-- industry trends and technologies,
-- regulatory changes (laws, regulators, enforcement).
+Generate ONE short search query (3–7 words, Russian) to find the latest news about the COMPANY itself:
+- Sanctions, lawsuits, government checks.
+- Financial results (revenue, profit, loss).
+- Management changes.
+- Scandals or negative press.
+- Major projects or contracts.
 
 === RULES ===
 - Return EXACTLY one line, without quotes or extra text.
+- Use the company's official name (brand or legal name like OOO "Romashka", PAO "Sberbank").
 - Prefer the year “2025”; if not applicable then “2024”.
-- If the city/region is present in the summary → include it; otherwise skip.
-- Avoid using the company’s brand name if possible; prefer sector/industry/OKVED wording from the summary.
+- If the city/region is present in the summary → include it.
 - No punctuation art, no pipes, no “Дата”, no markdown.
 
 === INPUT ===
@@ -41,10 +42,8 @@ def _sanitize_query_line(q: str) -> str:
     q = (q or "").replace("\n", " ").replace("\r", " ")
     q = q.replace("«", '"').replace("»", '"').replace("“", '"').replace("”", '"')
     q = q.strip(' "\'')
-    # убираем декоративщину и служебную лексику
     q = re.sub(r'\bДата\b', ' ', q, flags=re.IGNORECASE)
     q = q.replace("|", " ")
-    # схлопываем знаки и пробелы
     q = q.replace("\u00A0", " ")
     q = re.sub(r'[,\.;:]+', ' ', q)
     q = re.sub(r'\s+', ' ', q).strip()
@@ -59,7 +58,7 @@ def _ensure_year(q: str) -> str:
     return f"{q} {year}".strip()
 
 
-def _bound_words(q: str, lo: int = 6, hi: int = 12) -> str:
+def _bound_words(q: str, lo: int = 3, hi: int = 7) -> str:
     """Ограничиваем количество слов под поисковый запрос."""
     words = q.split()
     if len(words) < lo:
@@ -69,80 +68,69 @@ def _bound_words(q: str, lo: int = 6, hi: int = 12) -> str:
     return q
 
 
-def generate_market_query_one(
+def generate_company_query_one(
         company_summary_text: str,
         *,
         model: str = "models/gemini-2.0-flash-lite",
         max_output_tokens: int = 60,
 ) -> str:
+    """Генерирует поисковый запрос для новостей о КОНКРЕТНОЙ компании."""
     if not company_summary_text or not company_summary_text.strip():
         return ""
 
-    prompt = PROMPT_MARKET_DIGEST_NEWS.format(company_summary=company_summary_text)
+    prompt = PROMPT_COMPANY_DIGEST_NEWS.format(company_summary=company_summary_text)
     raw = call_to_gemini_api(
         prompt,
         model=model,
         max_output_tokens=max_output_tokens,
-        temperature=0.3,  # более детерминированно
+        temperature=0.2, # еще более детерминированно
         top_p=0.9,
     )
     query = _sanitize_query_line(raw)
     query = _ensure_year(query)
-    query = _bound_words(query, 6, 12)
+    query = _bound_words(query, 3, 7)
 
-    # На всякий случай уберём кавычки, если модель всё-таки сунула
     query = query.strip(' "\'')
 
     return query
 
 
-def get_market_digest(
-        company_summary_text: str,
-        *,
-        domains: Optional[Sequence[str]] = None,
-        num_pages: Optional[int] = None,
-) -> str:
+def get_company_digest(company_summary_text: str) -> str:
     """
-    Полный цикл: генерирует короткий рыночный запрос -> собирает новости -> делает итоговую сводку по рынку.
+    Полный цикл: генерирует запрос о компании -> ищет новости в вебе -> делает итоговую сводку.
     Возвращает путь к финальной сводке (txt) или пустую строку при неудаче.
     """
-    query = generate_market_query_one(company_summary_text)
+    query = generate_company_query_one(company_summary_text)
     if not query:
-        logger.error("Не удалось сгенерировать поисковый запрос.")
+        logger.error("Не удалось сгенерировать поисковый запрос для компании.")
         return ""
 
-    logger.info(f"Сгенерирован поисковый запрос для рынка: {query}")
+    logger.info(f"Сгенерирован поисковый запрос для компании: {query}")
 
-    # домены поиска
-    if domains is None:
-        domains = list(DOMAIN_WEIGHTS.keys())
-
-    # число страниц поиска
-    if num_pages is None:
-        try:
-            num_pages = PAGES_TO_SEARCH_MARKET
-        except NameError:
-            num_pages = 3
+    # Ищем на 1 странице, по всему интернету (список доменов пустой)
+    num_pages = 1
+    domains = []
 
     raw_json_path = run_full_search_and_parse(
         user_search_query=query,
-        domains_to_search=list(domains),
+        domains_to_search=domains,
         num_pages=num_pages,
-        path_to_output=MARKET_NEWS_OUTPUT_DIR,
+        path_to_output=COMPANY_NEWS_OUTPUT_DIR,
     )
 
     if not raw_json_path:
-        logger.warning("Не удалось собрать новости для рыночного дайджеста.")
+        logger.warning("Не удалось собрать новости для дайджеста по компании.")
         return ""
 
+    # Используем тот же пайплайн обработки, что и для рыночных новостей
     final_summary_path = run_gemini_processing_pipeline(
         raw_json_file_path=raw_json_path,
         context_query=query,
-        processed_data_dir=MARKET_NEWS_OUTPUT_DIR,
+        processed_data_dir=COMPANY_NEWS_OUTPUT_DIR,
     )
 
     if final_summary_path:
-        logger.info(f"Финальное саммари по рынку сохранено: {final_summary_path}")
+        logger.info(f"Финальное саммари по компании сохранено: {final_summary_path}")
         return final_summary_path
 
     return ""
